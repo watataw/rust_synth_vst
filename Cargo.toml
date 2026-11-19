@@ -1,0 +1,23 @@
+[package]
+name = "rust_modular_synth"
+version = "0.1.0"
+edition = "2021"
+authors = ["Architecte Audio"]
+description = "Synthétiseur modulaire Eurorack VST3/CLAP en Rust avec physique de câbles Verlet"
+
+[workspace]
+members = ["xtask"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+rtrb = "0.3.1"
+triple_buffer = "7.0.0"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+opt-level = 3
