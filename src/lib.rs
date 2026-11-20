@@ -1,17 +1,18 @@
 pub mod dsp;
 pub mod engine;
+pub mod i18n;
 pub mod physics;
 pub mod ui;
 
 use engine::{AudioCommand, AudioEngine, AudioGarbage, MidiMessage, TelemetrySnapshot};
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
+use nih_plug_vizia::widgets::ResizeHandle;
 use nih_plug_vizia::{create_vizia_editor, ViziaState, ViziaTheming};
 use std::sync::{Arc, Mutex};
 use triple_buffer::TripleBuffer;
 use ui::{RackCanvas, RackUiState};
 
-/// Canaux d'initialisation transférés de la création du Plugin vers l'éditeur UI.
 struct UiBridgeEndpoints {
     cmd_tx: Option<rtrb::Producer<AudioCommand>>,
     garbage_rx: Option<rtrb::Consumer<AudioGarbage>>,
@@ -30,7 +31,7 @@ pub struct ModularParams {
 impl Default for ModularParams {
     fn default() -> Self {
         Self {
-            editor_state: ViziaState::new(|| (1340, 560)),
+            editor_state: ViziaState::new(|| (1360, 620)),
             cable_alpha: FloatParam::new(
                 "Transparence Câbles",
                 0.85,
@@ -107,7 +108,6 @@ impl Plugin for RustModularSynth {
         let state_holder = self.ui_state_holder.clone();
 
         create_vizia_editor(self.params.editor_state.clone(), ViziaTheming::Custom, move |cx, _| {
-            // Récupère ou initialise l'état UI une seule fois (survit aux fermetures/réouvertures de fenêtre)
             let ui_state = {
                 let mut holder = state_holder.lock().unwrap();
                 if let Some(existing) = holder.as_ref() {
@@ -125,22 +125,19 @@ impl Plugin for RustModularSynth {
             };
 
             let params_for_view = params.clone();
-            VStack::new(cx, move |cx| {
-                RackCanvas::new(cx, ui_state.clone(), params_for_view)
-                    .width(Stretch(1.0))
-                    .height(Stretch(1.0));
-            });
+            RackCanvas::new(cx, ui_state.clone(), params_for_view)
+                .width(Stretch(1.0))
+                .height(Stretch(1.0));
+            ResizeHandle::new(cx);
         })
     }
 
-    /// Thread Audio Temps Réel : Zéro allocation, zéro verrou, zéro appel système.
     fn process(
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // 1. Applique les ajouts/retraits de modules et nouveaux plans topologiques
         self.audio_engine.poll_commands();
 
         let num_samples = buffer.samples();
@@ -155,7 +152,6 @@ impl Plugin for RustModularSynth {
 
         let mut next_event = context.next_event();
 
-        // 2. Boucle échantillon par échantillon (sample-by-sample)
         for sample_idx in 0..num_samples {
             while let Some(event) = next_event {
                 if event.timing() > sample_idx as u32 {
@@ -173,7 +169,6 @@ impl Plugin for RustModularSynth {
                         self.audio_engine.push_midi(MidiMessage::NoteOff { note });
                     }
                     NoteEvent::MidiPitchBend { value, .. } => {
-                        // nih-plug normalise le pitch bend sur [0.0, 1.0] (0.5 = centre)
                         let bipolar = (value - 0.5) * 2.0;
                         self.audio_engine.push_midi(MidiMessage::PitchBend { value: bipolar });
                     }
@@ -188,7 +183,6 @@ impl Plugin for RustModularSynth {
             right_ch[sample_idx] = r;
         }
 
-        // 3. Envoie les niveaux instantanés vers les LEDs de l'UI via triple_buffer
         self.audio_engine.publish_telemetry();
 
         ProcessStatus::Normal

@@ -23,7 +23,7 @@ impl LfoParams {
 
 /// Module 5 : LFO (0.05 Hz à 50 Hz) avec formes d'ondes et Sample & Hold.
 /// Entrées : 0: RST (Reset phase), 1: RATE CV (1V/Oct)
-/// Sorties : 0: OUT, 1: S&H, 2: INV
+/// Sorties : 0: OUT, 1: S&H, 2: INV, 3: Phase normalisée (0.0..1.0 pour synchro UI)
 pub struct LfoModule {
     params: Arc<LfoParams>,
     phase: f64,
@@ -112,6 +112,7 @@ impl DspModule for LfoModule {
         outputs[0] = out_volts;
         outputs[1] = sh_volts;
         outputs[2] = if unipolar { 5.0 - out_volts } else { -out_volts };
+        outputs[3] = self.phase as f32;
 
         self.phase += dt;
         if self.phase >= 1.0 {
