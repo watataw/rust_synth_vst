@@ -1,18 +1,19 @@
 use crate::dsp::{
-    AdsrModule, AdsrParams, AudioOutParams, AudioOutputModule, ChorusModule, ChorusParams,
-    DistortionModule, DistortionParams, LfoModule, LfoParams, MidiToCvModule, OverdriveModule,
-    OverdriveParams, PhaserModule, PhaserParams, VcaModule, VcaParams, VcfModule, VcfParams,
-    VcoModule, VcoParams,
+    AdsrParams, AudioOutParams, ChorusParams, DistortionParams, LfoParams, OverdriveParams,
+    PhaserParams, VcaParams, VcfParams, VcoParams,
 };
 use crate::engine::{
-    compile_execution_plan, AtomicF32, AudioCommand, AudioGarbage, DspModule, LogicalCable,
-    TelemetrySnapshot, MAX_MODULES, MAX_PORTS_PER_MODULE,
+    compile_execution_plan, AtomicF32, AudioCommand, AudioGarbage, LogicalCable, TelemetrySnapshot,
+    MAX_MODULES, MAX_PORTS_PER_MODULE,
 };
 use crate::i18n::{Language, Translations};
 use crate::physics::{CablePhysics, Vec2};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
+
+use super::presets::SYNTH_PRESETS;
+pub use super::theme::RackTheme;
 
 pub const RACK_TOP_Y: f32 = 54.0;
 pub const MODULE_HEIGHT: f32 = 492.0;
@@ -21,23 +22,6 @@ pub const ROW_STRIDE: f32 = MODULE_HEIGHT + ROW_GAP;
 pub const RACK_LEFT_MARGIN: f32 = 20.0;
 pub const MODULE_GAP: f32 = 4.0;
 pub const LFO_HISTORY_LEN: usize = 72;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RackTheme {
-    Current,
-    Dark,
-    Light,
-    VintageWood,
-}
-
-impl RackTheme {
-    pub const ALL: [RackTheme; 4] = [
-        RackTheme::Current,
-        RackTheme::Dark,
-        RackTheme::Light,
-        RackTheme::VintageWood,
-    ];
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightDrawerTab {
@@ -300,133 +284,6 @@ pub struct ContextMenuState {
     pub target_slot: Option<usize>,
 }
 
-#[derive(Clone, Copy)]
-pub struct PresetModuleSpec {
-    pub kind: ModuleKind,
-    pub row: usize,
-    pub knobs: &'static [f32],
-}
-
-#[derive(Clone, Copy)]
-pub struct PresetCableSpec {
-    pub src_mod_idx: usize,
-    pub src_port: usize,
-    pub dst_mod_idx: usize,
-    pub dst_port: usize,
-}
-
-#[derive(Clone, Copy)]
-pub struct SynthPreset {
-    pub modules: &'static [PresetModuleSpec],
-    pub cables: &'static [PresetCableSpec],
-}
-
-pub const SYNTH_PRESETS: [SynthPreset; 5] = [
-    SynthPreset {
-        modules: &[
-            PresetModuleSpec { kind: ModuleKind::MidiToCv, row: 0, knobs: &[] },
-            PresetModuleSpec { kind: ModuleKind::Vco, row: 0, knobs: &[0.0, 0.0, 0.2, 0.5] },
-            PresetModuleSpec { kind: ModuleKind::Vcf, row: 0, knobs: &[1850.0, 0.28, 1.3, 0.55] },
-            PresetModuleSpec { kind: ModuleKind::Adsr, row: 0, knobs: &[0.015, 0.28, 0.65, 0.32] },
-            PresetModuleSpec { kind: ModuleKind::Vca, row: 0, knobs: &[0.0, 1.0, 0.35] },
-            PresetModuleSpec { kind: ModuleKind::AudioOutput, row: 0, knobs: &[0.85] },
-        ],
-        cables: &[
-            PresetCableSpec { src_mod_idx: 0, src_port: 0, dst_mod_idx: 1, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 0, src_port: 1, dst_mod_idx: 3, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 1, src_port: 2, dst_mod_idx: 2, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 2, src_port: 0, dst_mod_idx: 4, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 3, src_port: 0, dst_mod_idx: 4, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 3, src_port: 0, dst_mod_idx: 2, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 4, src_port: 0, dst_mod_idx: 5, dst_port: 0 },
-        ],
-    },
-    SynthPreset {
-        modules: &[
-            PresetModuleSpec { kind: ModuleKind::MidiToCv, row: 0, knobs: &[] },
-            PresetModuleSpec { kind: ModuleKind::Vco, row: 0, knobs: &[-12.0, 0.0, 0.15, 0.35] },
-            PresetModuleSpec { kind: ModuleKind::Vcf, row: 0, knobs: &[380.0, 0.84, 2.6, 0.9] },
-            PresetModuleSpec { kind: ModuleKind::Adsr, row: 0, knobs: &[0.004, 0.21, 0.12, 0.14] },
-            PresetModuleSpec { kind: ModuleKind::Lfo, row: 0, knobs: &[0.45, 0.0, 0.0] },
-            PresetModuleSpec { kind: ModuleKind::Vca, row: 0, knobs: &[0.0, 1.0, 0.65] },
-            PresetModuleSpec { kind: ModuleKind::AudioOutput, row: 0, knobs: &[0.85] },
-        ],
-        cables: &[
-            PresetCableSpec { src_mod_idx: 0, src_port: 0, dst_mod_idx: 1, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 0, src_port: 1, dst_mod_idx: 3, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 1, src_port: 3, dst_mod_idx: 2, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 4, src_port: 0, dst_mod_idx: 1, dst_port: 2 },
-            PresetCableSpec { src_mod_idx: 3, src_port: 0, dst_mod_idx: 2, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 2, src_port: 0, dst_mod_idx: 5, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 3, src_port: 0, dst_mod_idx: 5, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 5, src_port: 0, dst_mod_idx: 6, dst_port: 0 },
-        ],
-    },
-    SynthPreset {
-        modules: &[
-            PresetModuleSpec { kind: ModuleKind::MidiToCv, row: 0, knobs: &[] },
-            PresetModuleSpec { kind: ModuleKind::Vco, row: 0, knobs: &[19.0, 0.04, 0.0, 0.5] },
-            PresetModuleSpec { kind: ModuleKind::Vco, row: 0, knobs: &[0.0, 0.0, 0.42, 0.5] },
-            PresetModuleSpec { kind: ModuleKind::Adsr, row: 0, knobs: &[0.002, 1.15, 0.0, 1.2] },
-            PresetModuleSpec { kind: ModuleKind::Vca, row: 0, knobs: &[0.0, 1.0, 0.85] },
-            PresetModuleSpec { kind: ModuleKind::AudioOutput, row: 0, knobs: &[0.85] },
-        ],
-        cables: &[
-            PresetCableSpec { src_mod_idx: 0, src_port: 0, dst_mod_idx: 1, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 0, src_port: 0, dst_mod_idx: 2, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 0, src_port: 1, dst_mod_idx: 3, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 1, src_port: 0, dst_mod_idx: 2, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 2, src_port: 0, dst_mod_idx: 4, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 3, src_port: 0, dst_mod_idx: 4, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 4, src_port: 0, dst_mod_idx: 5, dst_port: 0 },
-        ],
-    },
-    SynthPreset {
-        modules: &[
-            PresetModuleSpec { kind: ModuleKind::MidiToCv, row: 0, knobs: &[] },
-            PresetModuleSpec { kind: ModuleKind::Lfo, row: 0, knobs: &[6.5, 4.0, 1.0] },
-            PresetModuleSpec { kind: ModuleKind::Vco, row: 0, knobs: &[-12.0, 0.0, 0.28, 0.5] },
-            PresetModuleSpec { kind: ModuleKind::Vcf, row: 0, knobs: &[850.0, 0.72, 1.6, 0.65] },
-            PresetModuleSpec { kind: ModuleKind::Adsr, row: 0, knobs: &[0.06, 0.45, 0.75, 0.55] },
-            PresetModuleSpec { kind: ModuleKind::Vca, row: 0, knobs: &[0.0, 1.0, 0.4] },
-            PresetModuleSpec { kind: ModuleKind::AudioOutput, row: 0, knobs: &[0.85] },
-        ],
-        cables: &[
-            PresetCableSpec { src_mod_idx: 0, src_port: 0, dst_mod_idx: 2, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 0, src_port: 1, dst_mod_idx: 4, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 1, src_port: 1, dst_mod_idx: 2, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 1, src_port: 1, dst_mod_idx: 3, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 2, src_port: 2, dst_mod_idx: 3, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 3, src_port: 1, dst_mod_idx: 5, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 4, src_port: 0, dst_mod_idx: 5, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 5, src_port: 0, dst_mod_idx: 6, dst_port: 0 },
-        ],
-    },
-    SynthPreset {
-        modules: &[
-            PresetModuleSpec { kind: ModuleKind::MidiToCv, row: 0, knobs: &[] },
-            PresetModuleSpec { kind: ModuleKind::Vco, row: 0, knobs: &[0.0, -0.22, 0.1, 0.5] },
-            PresetModuleSpec { kind: ModuleKind::Vco, row: 0, knobs: &[0.0, 0.22, 0.1, 0.5] },
-            PresetModuleSpec { kind: ModuleKind::Lfo, row: 0, knobs: &[0.32, 1.0, 0.0] },
-            PresetModuleSpec { kind: ModuleKind::Vcf, row: 1, knobs: &[980.0, 0.22, 1.2, 0.45] },
-            PresetModuleSpec { kind: ModuleKind::Adsr, row: 1, knobs: &[0.55, 0.85, 0.78, 1.35] },
-            PresetModuleSpec { kind: ModuleKind::Vca, row: 1, knobs: &[0.0, 1.0, 0.5] },
-            PresetModuleSpec { kind: ModuleKind::AudioOutput, row: 1, knobs: &[0.85] },
-        ],
-        cables: &[
-            PresetCableSpec { src_mod_idx: 0, src_port: 0, dst_mod_idx: 1, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 0, src_port: 0, dst_mod_idx: 2, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 0, src_port: 1, dst_mod_idx: 5, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 1, src_port: 2, dst_mod_idx: 4, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 2, src_port: 1, dst_mod_idx: 4, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 3, src_port: 0, dst_mod_idx: 4, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 4, src_port: 0, dst_mod_idx: 6, dst_port: 0 },
-            PresetCableSpec { src_mod_idx: 5, src_port: 0, dst_mod_idx: 6, dst_port: 1 },
-            PresetCableSpec { src_mod_idx: 6, src_port: 0, dst_mod_idx: 7, dst_port: 0 },
-        ],
-    },
-];
-
 pub struct RackUiState {
     pub modules: Vec<ModuleVisual>,
     pub cables: Vec<PatchCableVisual>,
@@ -454,6 +311,7 @@ pub struct RackUiState {
     pub zoom: f32,
     pub pan_x: f32,
     pub pan_y: f32,
+    pub auto_fit: bool,
     pub lfo_histories: HashMap<usize, VecDeque<f32>>,
     next_color_idx: usize,
 }
@@ -491,6 +349,7 @@ impl RackUiState {
             zoom: 1.0,
             pan_x: 0.0,
             pan_y: 0.0,
+            auto_fit: true,
             lfo_histories: HashMap::new(),
             next_color_idx: 0,
         };
@@ -504,7 +363,8 @@ impl RackUiState {
     }
 
     pub fn screen_to_world(&self, sx: f32, sy: f32) -> Vec2 {
-        Vec2::new((sx - self.pan_x) / self.zoom, (sy - self.pan_y) / self.zoom)
+        let z = self.zoom.max(0.05);
+        Vec2::new((sx - self.pan_x) / z, (sy - self.pan_y) / z)
     }
 
     pub fn collect_garbage(&mut self) {
@@ -532,330 +392,8 @@ impl RackUiState {
         }
     }
 
-    fn allocate_slot(&self) -> Option<usize> {
+    pub(super) fn allocate_slot(&self) -> Option<usize> {
         (0..MAX_MODULES).find(|&s| !self.modules.iter().any(|m| m.slot_id == s))
-    }
-
-    pub fn spawn_module_at(
-        &mut self,
-        kind: ModuleKind,
-        target_row: usize,
-        target_x: Option<f32>,
-    ) -> Option<usize> {
-        let slot_id = self.allocate_slot()?;
-        let x = target_x.unwrap_or_else(|| {
-            self.modules
-                .iter()
-                .filter(|m| m.row == target_row)
-                .map(|m| m.x + m.kind.width() + MODULE_GAP)
-                .fold(RACK_LEFT_MARGIN, f32::max)
-        });
-
-        let (dsp_box, visual): (Box<dyn DspModule>, ModuleVisual) = match kind {
-            ModuleKind::MidiToCv => {
-                let dsp = Box::new(MidiToCvModule::new());
-                let ports = vec![
-                    UiPort { name: "V/OCT", index: 0, direction: PortDirection::Output, local_x: 42.0,  local_y: 255.0 },
-                    UiPort { name: "GATE",  index: 1, direction: PortDirection::Output, local_x: 102.0, local_y: 255.0 },
-                    UiPort { name: "TRIG",  index: 2, direction: PortDirection::Output, local_x: 42.0,  local_y: 330.0 },
-                    UiPort { name: "VEL",   index: 3, direction: PortDirection::Output, local_x: 102.0, local_y: 330.0 },
-                    UiPort { name: "BEND",  index: 4, direction: PortDirection::Output, local_x: 72.0,  local_y: 405.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs: Vec::new(),
-                        dsp_params: ModuleParamHandle::None,
-                    },
-                )
-            }
-            ModuleKind::Vco => {
-                let params = VcoParams::new();
-                let dsp = Box::new(VcoModule::new(params.clone()));
-                let knobs = vec![
-                    UiKnob { label: "COARSE", local_x: 54.0,  local_y: 162.0, radius: 18.0, min: -24.0, max: 24.0, default: 0.0,  style: KnobDisplayStyle::Semitones, param: Arc::new(AtomicF32::new(0.0)) },
-                    UiKnob { label: "FINE",   local_x: 132.0, local_y: 162.0, radius: 16.0, min: -1.0,  max: 1.0,  default: 0.0,  style: KnobDisplayStyle::Semitones, param: Arc::new(AtomicF32::new(0.0)) },
-                    UiKnob { label: "FM",     local_x: 54.0,  local_y: 228.0, radius: 16.0, min: 0.0,   max: 1.0,  default: 0.25, style: KnobDisplayStyle::Percent,   param: Arc::new(AtomicF32::new(0.25)) },
-                    UiKnob { label: "PWM",    local_x: 132.0, local_y: 228.0, radius: 16.0, min: 0.05,  max: 0.95, default: 0.5,  style: KnobDisplayStyle::Percent,   param: Arc::new(AtomicF32::new(0.5)) },
-                ];
-                let ports = vec![
-                    UiPort { name: "V/OCT", index: 0, direction: PortDirection::Input,  local_x: 42.0,  local_y: 300.0 },
-                    UiPort { name: "FM",    index: 1, direction: PortDirection::Input,  local_x: 93.0,  local_y: 300.0 },
-                    UiPort { name: "PWM",   index: 2, direction: PortDirection::Input,  local_x: 144.0, local_y: 300.0 },
-                    UiPort { name: "SIN",   index: 0, direction: PortDirection::Output, local_x: 46.0,  local_y: 368.0 },
-                    UiPort { name: "TRI",   index: 1, direction: PortDirection::Output, local_x: 140.0, local_y: 368.0 },
-                    UiPort { name: "SAW",   index: 2, direction: PortDirection::Output, local_x: 46.0,  local_y: 432.0 },
-                    UiPort { name: "SQR",   index: 3, direction: PortDirection::Output, local_x: 140.0, local_y: 432.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs,
-                        dsp_params: ModuleParamHandle::Vco(params),
-                    },
-                )
-            }
-            ModuleKind::Vcf => {
-                let params = VcfParams::new();
-                let dsp = Box::new(VcfModule::new(params.clone()));
-                let knobs = vec![
-                    UiKnob { label: "CUTOFF", local_x: 54.0,  local_y: 162.0, radius: 19.0, min: 20.0, max: 16000.0, default: 1400.0, style: KnobDisplayStyle::Hertz,   param: Arc::new(AtomicF32::new(1400.0)) },
-                    UiKnob { label: "RES",    local_x: 132.0, local_y: 162.0, radius: 17.0, min: 0.0,  max: 0.98,    default: 0.25,   style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.25)) },
-                    UiKnob { label: "DRIVE",  local_x: 54.0,  local_y: 228.0, radius: 15.0, min: 0.5,  max: 4.0,     default: 1.2,    style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(1.2)) },
-                    UiKnob { label: "CV AMT", local_x: 132.0, local_y: 228.0, radius: 15.0, min: -1.0, max: 1.0,     default: 0.5,    style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.5)) },
-                ];
-                let ports = vec![
-                    UiPort { name: "IN",     index: 0, direction: PortDirection::Input,  local_x: 42.0,  local_y: 305.0 },
-                    UiPort { name: "CUT CV", index: 1, direction: PortDirection::Input,  local_x: 93.0,  local_y: 305.0 },
-                    UiPort { name: "RES CV", index: 2, direction: PortDirection::Input,  local_x: 144.0, local_y: 305.0 },
-                    UiPort { name: "LP 24",  index: 0, direction: PortDirection::Output, local_x: 42.0,  local_y: 395.0 },
-                    UiPort { name: "BP 12",  index: 1, direction: PortDirection::Output, local_x: 93.0,  local_y: 395.0 },
-                    UiPort { name: "HP 24",  index: 2, direction: PortDirection::Output, local_x: 144.0, local_y: 395.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs,
-                        dsp_params: ModuleParamHandle::Vcf(params),
-                    },
-                )
-            }
-            ModuleKind::Adsr => {
-                let params = AdsrParams::new();
-                let dsp = Box::new(AdsrModule::new(params.clone()));
-                let knobs = vec![
-                    UiKnob { label: "ATK", local_x: 52.0,  local_y: 162.0, radius: 17.0, min: 0.001, max: 2.0, default: 0.02, style: KnobDisplayStyle::Milliseconds, param: Arc::new(AtomicF32::new(0.02)) },
-                    UiKnob { label: "DEC", local_x: 124.0, local_y: 162.0, radius: 17.0, min: 0.005, max: 3.0, default: 0.28, style: KnobDisplayStyle::Milliseconds, param: Arc::new(AtomicF32::new(0.28)) },
-                    UiKnob { label: "SUS", local_x: 52.0,  local_y: 232.0, radius: 17.0, min: 0.0,   max: 1.0, default: 0.65, style: KnobDisplayStyle::Percent,      param: Arc::new(AtomicF32::new(0.65)) },
-                    UiKnob { label: "REL", local_x: 124.0, local_y: 232.0, radius: 17.0, min: 0.005, max: 4.0, default: 0.35, style: KnobDisplayStyle::Milliseconds, param: Arc::new(AtomicF32::new(0.35)) },
-                ];
-                let ports = vec![
-                    UiPort { name: "GATE", index: 0, direction: PortDirection::Input,  local_x: 52.0,  local_y: 315.0 },
-                    UiPort { name: "TRIG", index: 1, direction: PortDirection::Input,  local_x: 124.0, local_y: 315.0 },
-                    UiPort { name: "ENV",  index: 0, direction: PortDirection::Output, local_x: 52.0,  local_y: 398.0 },
-                    UiPort { name: "INV",  index: 1, direction: PortDirection::Output, local_x: 124.0, local_y: 398.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs,
-                        dsp_params: ModuleParamHandle::Adsr(params),
-                    },
-                )
-            }
-            ModuleKind::Lfo => {
-                let params = LfoParams::new();
-                let dsp = Box::new(LfoModule::new(params.clone()));
-                let knobs = vec![
-                    UiKnob { label: "RATE", local_x: 82.0,  local_y: 162.0, radius: 19.0, min: 0.05, max: 40.0, default: 1.8, style: KnobDisplayStyle::Hertz,    param: Arc::new(AtomicF32::new(1.8)) },
-                    UiKnob { label: "WAVE", local_x: 48.0,  local_y: 232.0, radius: 16.0, min: 0.0,  max: 4.0,  default: 0.0, style: KnobDisplayStyle::LfoWave,  param: Arc::new(AtomicF32::new(0.0)) },
-                    UiKnob { label: "MODE", local_x: 116.0, local_y: 232.0, radius: 16.0, min: 0.0,  max: 1.0,  default: 0.0, style: KnobDisplayStyle::Polarity, param: Arc::new(AtomicF32::new(0.0)) },
-                ];
-                let ports = vec![
-                    UiPort { name: "RST",     index: 0, direction: PortDirection::Input,  local_x: 48.0,  local_y: 315.0 },
-                    UiPort { name: "RATE CV", index: 1, direction: PortDirection::Input,  local_x: 116.0, local_y: 315.0 },
-                    UiPort { name: "OUT",     index: 0, direction: PortDirection::Output, local_x: 38.0,  local_y: 398.0 },
-                    UiPort { name: "S&H",     index: 1, direction: PortDirection::Output, local_x: 82.0,  local_y: 398.0 },
-                    UiPort { name: "INV",     index: 2, direction: PortDirection::Output, local_x: 126.0, local_y: 398.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs,
-                        dsp_params: ModuleParamHandle::Lfo(params),
-                    },
-                )
-            }
-            ModuleKind::Vca => {
-                let params = VcaParams::new();
-                let dsp = Box::new(VcaModule::new(params.clone()));
-                let knobs = vec![
-                    UiKnob { label: "LEVEL",  local_x: 74.0,  local_y: 162.0, radius: 18.0, min: 0.0, max: 1.0, default: 0.0,  style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.0)) },
-                    UiKnob { label: "CV AMT", local_x: 44.0,  local_y: 232.0, radius: 15.0, min: 0.0, max: 1.0, default: 1.0,  style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(1.0)) },
-                    UiKnob { label: "CURVE",  local_x: 104.0, local_y: 232.0, radius: 15.0, min: 0.0, max: 1.0, default: 0.35, style: KnobDisplayStyle::LinExp,  param: Arc::new(AtomicF32::new(0.35)) },
-                ];
-                let ports = vec![
-                    UiPort { name: "IN",  index: 0, direction: PortDirection::Input,  local_x: 46.0,  local_y: 315.0 },
-                    UiPort { name: "CV",  index: 1, direction: PortDirection::Input,  local_x: 102.0, local_y: 315.0 },
-                    UiPort { name: "OUT", index: 0, direction: PortDirection::Output, local_x: 74.0,  local_y: 398.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs,
-                        dsp_params: ModuleParamHandle::Vca(params),
-                    },
-                )
-            }
-            ModuleKind::AudioOutput => {
-                let params = AudioOutParams::new();
-                let dsp = Box::new(AudioOutputModule::new(params.clone()));
-                let knobs = vec![
-                    UiKnob { label: "MASTER", local_x: 78.0, local_y: 170.0, radius: 22.0, min: 0.0, max: 1.5, default: 0.85, style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.85)) },
-                ];
-                let ports = vec![
-                    UiPort { name: "IN L", index: 0, direction: PortDirection::Input, local_x: 48.0,  local_y: 398.0 },
-                    UiPort { name: "IN R", index: 1, direction: PortDirection::Input, local_x: 108.0, local_y: 398.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs,
-                        dsp_params: ModuleParamHandle::AudioOut(params),
-                    },
-                )
-            }
-            ModuleKind::Overdrive => {
-                let params = OverdriveParams::new();
-                let dsp = Box::new(OverdriveModule::new(params.clone()));
-                let knobs = vec![
-                    UiKnob { label: "DRIVE", local_x: 78.0,  local_y: 162.0, radius: 18.0, min: 0.0, max: 1.0, default: 0.35, style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.35)) },
-                    UiKnob { label: "TONE",  local_x: 46.0,  local_y: 232.0, radius: 15.0, min: 0.0, max: 1.0, default: 0.6,  style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.6)) },
-                    UiKnob { label: "MIX",   local_x: 110.0, local_y: 232.0, radius: 15.0, min: 0.0, max: 1.0, default: 1.0,  style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(1.0)) },
-                ];
-                let ports = vec![
-                    UiPort { name: "IN",     index: 0, direction: PortDirection::Input,  local_x: 48.0,  local_y: 315.0 },
-                    UiPort { name: "DRV CV", index: 1, direction: PortDirection::Input,  local_x: 108.0, local_y: 315.0 },
-                    UiPort { name: "OUT",    index: 0, direction: PortDirection::Output, local_x: 78.0,  local_y: 398.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs,
-                        dsp_params: ModuleParamHandle::Overdrive(params),
-                    },
-                )
-            }
-            ModuleKind::Distortion => {
-                let params = DistortionParams::new();
-                let dsp = Box::new(DistortionModule::new(params.clone()));
-                let knobs = vec![
-                    UiKnob { label: "DRIVE", local_x: 78.0,  local_y: 162.0, radius: 18.0, min: 0.0, max: 1.0, default: 0.5, style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.5)) },
-                    UiKnob { label: "FOLD",  local_x: 46.0,  local_y: 232.0, radius: 15.0, min: 0.0, max: 1.0, default: 0.3, style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.3)) },
-                    UiKnob { label: "MIX",   local_x: 110.0, local_y: 232.0, radius: 15.0, min: 0.0, max: 1.0, default: 1.0, style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(1.0)) },
-                ];
-                let ports = vec![
-                    UiPort { name: "IN",     index: 0, direction: PortDirection::Input,  local_x: 48.0,  local_y: 315.0 },
-                    UiPort { name: "FLD CV", index: 1, direction: PortDirection::Input,  local_x: 108.0, local_y: 315.0 },
-                    UiPort { name: "OUT",    index: 0, direction: PortDirection::Output, local_x: 78.0,  local_y: 398.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs,
-                        dsp_params: ModuleParamHandle::Distortion(params),
-                    },
-                )
-            }
-            ModuleKind::Chorus => {
-                let params = ChorusParams::new();
-                let dsp = Box::new(ChorusModule::new(params.clone()));
-                let knobs = vec![
-                    UiKnob { label: "RATE",  local_x: 82.0,  local_y: 162.0, radius: 18.0, min: 0.05, max: 5.0, default: 0.6, style: KnobDisplayStyle::Hertz,   param: Arc::new(AtomicF32::new(0.6)) },
-                    UiKnob { label: "DEPTH", local_x: 48.0,  local_y: 232.0, radius: 15.0, min: 0.0,  max: 1.0, default: 0.6, style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.6)) },
-                    UiKnob { label: "MIX",   local_x: 116.0, local_y: 232.0, radius: 15.0, min: 0.0,  max: 1.0, default: 0.5, style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.5)) },
-                ];
-                let ports = vec![
-                    UiPort { name: "IN",      index: 0, direction: PortDirection::Input,  local_x: 48.0,  local_y: 315.0 },
-                    UiPort { name: "RATE CV", index: 1, direction: PortDirection::Input,  local_x: 116.0, local_y: 315.0 },
-                    UiPort { name: "OUT L",   index: 0, direction: PortDirection::Output, local_x: 48.0,  local_y: 398.0 },
-                    UiPort { name: "OUT R",   index: 1, direction: PortDirection::Output, local_x: 116.0, local_y: 398.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs,
-                        dsp_params: ModuleParamHandle::Chorus(params),
-                    },
-                )
-            }
-            ModuleKind::Phaser => {
-                let params = PhaserParams::new();
-                let dsp = Box::new(PhaserModule::new(params.clone()));
-                let knobs = vec![
-                    UiKnob { label: "RATE",  local_x: 82.0,  local_y: 162.0, radius: 18.0, min: 0.05, max: 6.0,  default: 0.45, style: KnobDisplayStyle::Hertz,   param: Arc::new(AtomicF32::new(0.45)) },
-                    UiKnob { label: "DEPTH", local_x: 48.0,  local_y: 232.0, radius: 15.0, min: 0.0,  max: 1.0,  default: 0.7,  style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.7)) },
-                    UiKnob { label: "FDBK",  local_x: 116.0, local_y: 232.0, radius: 15.0, min: 0.0,  max: 0.92, default: 0.45, style: KnobDisplayStyle::Percent, param: Arc::new(AtomicF32::new(0.45)) },
-                ];
-                let ports = vec![
-                    UiPort { name: "IN",    index: 0, direction: PortDirection::Input,  local_x: 48.0,  local_y: 315.0 },
-                    UiPort { name: "SWEEP", index: 1, direction: PortDirection::Input,  local_x: 116.0, local_y: 315.0 },
-                    UiPort { name: "OUT",   index: 0, direction: PortDirection::Output, local_x: 82.0,  local_y: 398.0 },
-                ];
-                (
-                    dsp,
-                    ModuleVisual {
-                        slot_id,
-                        kind,
-                        row: target_row,
-                        x,
-                        ports,
-                        knobs,
-                        dsp_params: ModuleParamHandle::Phaser(params),
-                    },
-                )
-            }
-        };
-
-        let _ = self.cmd_tx.push(AudioCommand::InsertModule {
-            slot_id,
-            module: dsp_box,
-        });
-
-        self.modules.push(visual);
-        self.pack_modules();
-        self.recompile_and_push_plan();
-        Some(slot_id)
     }
 
     pub fn remove_module(&mut self, slot_id: usize) {
@@ -884,6 +422,7 @@ impl RackUiState {
         self.next_color_idx = 0;
         self.pan_x = 0.0;
         self.pan_y = 0.0;
+        self.auto_fit = true;
 
         let mut created_slots = Vec::with_capacity(preset.modules.len());
         for spec in preset.modules {
@@ -951,17 +490,55 @@ impl RackUiState {
     }
 
     pub fn max_row_width(&self) -> f32 {
-        let mut max_w = 640.0f32;
-        for r in 0..self.num_rows() {
+        self.rack_content_size(self.num_rows()).0
+    }
+
+    pub fn rack_content_size(&self, display_rows: usize) -> (f32, f32) {
+        let rows = display_rows.max(1);
+        let mut max_w = if self.modules.is_empty() { 480.0f32 } else { 240.0f32 };
+        for r in 0..rows {
             let row_end = self
                 .modules
                 .iter()
                 .filter(|m| m.row == r)
-                .map(|m| m.x + m.kind.width() + 40.0)
+                .map(|m| m.x + m.kind.width() + RACK_LEFT_MARGIN)
                 .fold(0.0f32, f32::max);
             max_w = max_w.max(row_end);
         }
-        max_w
+        let total_h = RACK_TOP_Y + (rows as f32) * ROW_STRIDE + 16.0;
+        (max_w, total_h)
+    }
+
+    pub fn fit_to_viewport(&mut self, avail_w: f32, avail_h: f32, display_rows: usize) {
+        let (content_w, content_h) = self.rack_content_size(display_rows);
+        let usable_w = (avail_w - 16.0).max(80.0);
+        let usable_h = (avail_h - RACK_TOP_Y - 12.0).max(80.0);
+        let world_h = (content_h - RACK_TOP_Y).max(80.0);
+
+        let scale_x = usable_w / content_w.max(1.0);
+        let scale_y = usable_h / world_h;
+        let new_zoom = scale_x.min(scale_y).clamp(0.15, 1.75);
+
+        self.zoom = new_zoom;
+        let scaled_w = content_w * new_zoom;
+        self.pan_x = ((avail_w - scaled_w) * 0.5).max(6.0);
+        self.pan_y = RACK_TOP_Y * (1.0 - new_zoom);
+    }
+
+    pub fn clamp_pan(&mut self, avail_w: f32, avail_h: f32, display_rows: usize) {
+        let (content_w, content_h) = self.rack_content_size(display_rows);
+        let scaled_w = content_w * self.zoom;
+        let scaled_h = content_h * self.zoom;
+        let margin_x = (avail_w * 0.35).max(120.0);
+        let margin_y = (avail_h * 0.35).max(120.0);
+
+        let min_x = (avail_w - scaled_w - margin_x).min(margin_x);
+        let max_x = margin_x.max(avail_w - scaled_w);
+        let min_y = (avail_h - scaled_h - margin_y).min(margin_y);
+        let max_y = margin_y.max(avail_h - scaled_h);
+
+        self.pan_x = self.pan_x.clamp(min_x, max_x);
+        self.pan_y = self.pan_y.clamp(min_y, max_y);
     }
 
     pub fn sync_module_knobs_to_dsp(&self, slot_id: usize) {

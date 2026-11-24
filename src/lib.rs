@@ -1,13 +1,14 @@
 pub mod dsp;
+mod editor;
 pub mod engine;
 pub mod i18n;
 pub mod physics;
 pub mod ui;
 
+use editor::ResizableViziaEditor;
 use engine::{AudioCommand, AudioEngine, AudioGarbage, MidiMessage, TelemetrySnapshot};
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
-use nih_plug_vizia::widgets::ResizeHandle;
 use nih_plug_vizia::{create_vizia_editor, ViziaState, ViziaTheming};
 use std::sync::{Arc, Mutex};
 use triple_buffer::TripleBuffer;
@@ -106,30 +107,43 @@ impl Plugin for RustModularSynth {
         let params = self.params.clone();
         let endpoints = self.ui_endpoints.clone();
         let state_holder = self.ui_state_holder.clone();
+        let initial_size = self.params.editor_state.inner_logical_size();
+        let window_size = Arc::new(Mutex::new(initial_size));
+        let window_size_for_view = window_size.clone();
 
-        create_vizia_editor(self.params.editor_state.clone(), ViziaTheming::Custom, move |cx, _| {
-            let ui_state = {
-                let mut holder = state_holder.lock().unwrap();
-                if let Some(existing) = holder.as_ref() {
-                    existing.clone()
-                } else {
-                    let mut ep = endpoints.lock().unwrap();
-                    let created = Arc::new(Mutex::new(RackUiState::new(
-                        ep.cmd_tx.take().expect("cmd_tx déjà consommé"),
-                        ep.garbage_rx.take().expect("garbage_rx déjà consommé"),
-                        ep.telemetry_rx.take().expect("telemetry_rx déjà consommé"),
-                    )));
-                    *holder = Some(created.clone());
-                    created
-                }
-            };
+        let editor = create_vizia_editor(
+            self.params.editor_state.clone(),
+            ViziaTheming::Custom,
+            move |cx, gui_context| {
+                let ui_state = {
+                    let mut holder = state_holder.lock().unwrap();
+                    if let Some(existing) = holder.as_ref() {
+                        existing.clone()
+                    } else {
+                        let mut ep = endpoints.lock().unwrap();
+                        let created = Arc::new(Mutex::new(RackUiState::new(
+                            ep.cmd_tx.take().expect("cmd_tx déjà consommé"),
+                            ep.garbage_rx.take().expect("garbage_rx déjà consommé"),
+                            ep.telemetry_rx.take().expect("telemetry_rx déjà consommé"),
+                        )));
+                        *holder = Some(created.clone());
+                        created
+                    }
+                };
 
-            let params_for_view = params.clone();
-            RackCanvas::new(cx, ui_state.clone(), params_for_view)
-                .width(Stretch(1.0))
-                .height(Stretch(1.0));
-            ResizeHandle::new(cx);
-        })
+                RackCanvas::new(
+                    cx,
+                    ui_state,
+                    params.clone(),
+                    gui_context.clone(),
+                    window_size_for_view.clone(),
+                )
+                    .width(Stretch(1.0))
+                    .height(Stretch(1.0));
+            },
+        )?;
+
+        Some(ResizableViziaEditor::new(editor, window_size))
     }
 
     fn process(
