@@ -10,6 +10,7 @@ use engine::{AudioCommand, AudioEngine, AudioGarbage, MidiMessage, TelemetrySnap
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::{create_vizia_editor, ViziaState, ViziaTheming};
+use std::sync::atomic::AtomicIsize;
 use std::sync::{Arc, Mutex};
 use triple_buffer::TripleBuffer;
 use ui::{RackCanvas, RackUiState};
@@ -105,16 +106,16 @@ impl Plugin for RustModularSynth {
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         let params = self.params.clone();
+        let editor_state = self.params.editor_state.clone();
         let endpoints = self.ui_endpoints.clone();
         let state_holder = self.ui_state_holder.clone();
-        let initial_size = self.params.editor_state.inner_logical_size();
-        let window_size = Arc::new(Mutex::new(initial_size));
-        let window_size_for_view = window_size.clone();
+        let parent_hwnd = Arc::new(AtomicIsize::new(0));
+        let parent_hwnd_for_view = parent_hwnd.clone();
 
         let editor = create_vizia_editor(
             self.params.editor_state.clone(),
             ViziaTheming::Custom,
-            move |cx, gui_context| {
+            move |cx, _gui_context| {
                 let ui_state = {
                     let mut holder = state_holder.lock().unwrap();
                     if let Some(existing) = holder.as_ref() {
@@ -135,15 +136,15 @@ impl Plugin for RustModularSynth {
                     cx,
                     ui_state,
                     params.clone(),
-                    gui_context.clone(),
-                    window_size_for_view.clone(),
+                    editor_state.clone(),
+                    parent_hwnd_for_view.clone(),
                 )
                     .width(Stretch(1.0))
                     .height(Stretch(1.0));
             },
         )?;
 
-        Some(ResizableViziaEditor::new(editor, window_size))
+        Some(ResizableViziaEditor::new(editor, parent_hwnd))
     }
 
     fn process(

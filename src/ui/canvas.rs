@@ -11,28 +11,59 @@ use crate::engine::LogicalCable;
 use crate::i18n::Language;
 use crate::physics::{CablePhysics, Vec2};
 use crate::ModularParams;
-use nih_plug::prelude::GuiContext;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg::{Align, Baseline, Color, FontId, Paint, Path};
+use nih_plug_vizia::ViziaState;
 use std::cell::Cell;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MIN_LOGICAL_W: u32 = 560;
 const MIN_LOGICAL_H: u32 = 380;
-const MAX_LOGICAL_W: u32 = 2560;
-const MAX_LOGICAL_H: u32 = 1440;
+const MAX_LOGICAL_W: u32 = 3840;
+const MAX_LOGICAL_H: u32 = 2160;
+
+#[derive(Lens)]
+struct CanvasWindowSizeModel {
+    width: Units,
+    height: Units,
+}
+
+enum CanvasSizeEvent {
+    SetLogicalSize(u32, u32),
+}
+
+impl Model for CanvasWindowSizeModel {
+    fn event(&mut self, _cx: &mut EventContext, event: &mut Event) {
+        event.map(|msg, _| match msg {
+            CanvasSizeEvent::SetLogicalSize(w, h) => {
+                self.width = Units::Pixels(*w as f32);
+                self.height = Units::Pixels(*h as f32);
+            }
+        });
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PreFullscreenState {
+    logical_w: u32,
+    logical_h: u32,
+    root_left: i32,
+    root_top: i32,
+}
 
 pub struct RackCanvas {
     state: Arc<Mutex<RackUiState>>,
     params: Arc<ModularParams>,
-    gui_context: Arc<dyn GuiContext>,
-    window_size: Arc<Mutex<(u32, u32)>>,
-    pre_fullscreen_size: Cell<Option<(u32, u32)>>,
+    editor_state: Arc<ViziaState>,
+    parent_hwnd: Arc<AtomicIsize>,
+    pre_fullscreen: Cell<Option<PreFullscreenState>>,
     font_regular: Cell<Option<FontId>>,
     font_bold: Cell<Option<FontId>>,
     last_size: Cell<(f32, f32)>,
     window_resize_drag: Cell<Option<(f32, f32, f32, f32)>>,
+    last_sent_logical_size: Cell<(u32, u32)>,
     last_resize_request: Cell<Instant>,
 }
 
@@ -41,8 +72,8 @@ impl RackCanvas {
         cx: &mut Context,
         state: Arc<Mutex<RackUiState>>,
         params: Arc<ModularParams>,
-        gui_context: Arc<dyn GuiContext>,
-        window_size: Arc<Mutex<(u32, u32)>>,
+        editor_state: Arc<ViziaState>,
+        parent_hwnd: Arc<AtomicIsize>,
     ) -> Handle<'_, Self> {
         let timer = cx.add_timer(Duration::from_millis(16), None, |cx, action| {
             if matches!(action, TimerAction::Tick(_)) {
@@ -51,66 +82,105 @@ impl RackCanvas {
         });
         cx.start_timer(timer);
 
+        let initial_size = editor_state.inner_logical_size();
+
+        CanvasWindowSizeModel {
+            width: Units::Pixels(initial_size.0 as f32),
+            height: Units::Pixels(initial_size.1 as f32),
+        }
+            .build(cx);
+
         Self {
             state,
             params,
-            gui_context,
-            window_size,
-            pre_fullscreen_size: Cell::new(None),
+            editor_state,
+            parent_hwnd,
+            pre_fullscreen: Cell::new(None),
             font_regular: Cell::new(None),
             font_bold: Cell::new(None),
-            last_size: Cell::new((1360.0, 620.0)),
+            last_size: Cell::new((initial_size.0 as f32, initial_size.1 as f32)),
             window_resize_drag: Cell::new(None),
-            last_resize_request: Cell::new(Instant::now()),
+            last_sent_logical_size: Cell::new(initial_size),
+            last_resize_request: Cell::new(Instant::now() - Duration::from_secs(1)),
         }
             .build(cx, |_| {})
-            .width(Percentage(100.0))
-            .height(Percentage(100.0))
+            .width(CanvasWindowSizeModel::width)
+            .height(CanvasWindowSizeModel::height)
     }
 
     pub(super) fn is_fullscreen(&self) -> bool {
-        self.pre_fullscreen_size.get().is_some()
+        self.pre_fullscreen.get().is_some()
     }
 
-    fn current_true_scale(&self, cx_scale: f32) -> f32 {
-        let (bounds_w, _) = self.last_size.get();
-        let logical_w = self.window_size.lock().unwrap().0.max(1) as f32;
-        (bounds_w / logical_w).max(cx_scale).max(1.0)
+    fn current_logical_size(&self, cx_scale: f32) -> (u32, u32) {
+        let state_size = self.editor_state.inner_logical_size();
+        if state_size.0 >= MIN_LOGICAL_W && state_size.1 >= MIN_LOGICAL_H {
+            state_size
+        } else {
+            let scale = cx_scale.max(1.0);
+            let (phys_w, phys_h) = self.last_size.get();
+            (
+                (phys_w / scale).round().max(MIN_LOGICAL_W as f32) as u32,
+                (phys_h / scale).round().max(MIN_LOGICAL_H as f32) as u32,
+            )
+        }
     }
 
-    fn request_window_resize(&self, new_w: u32, new_h: u32, force: bool) {
+    fn set_canvas_logical_size(&self, cx: &mut EventContext, new_w: u32, new_h: u32) {
+        let clamped_w = new_w.clamp(MIN_LOGICAL_W, MAX_LOGICAL_W);
+        let clamped_h = new_h.clamp(MIN_LOGICAL_H, MAX_LOGICAL_H);
+        cx.emit(CanvasSizeEvent::SetLogicalSize(clamped_w, clamped_h));
+        cx.needs_relayout();
+    }
+
+    fn request_window_resize(&self, cx: &mut EventContext, new_w: u32, new_h: u32, force: bool) {
         let clamped = (
             new_w.clamp(MIN_LOGICAL_W, MAX_LOGICAL_W),
             new_h.clamp(MIN_LOGICAL_H, MAX_LOGICAL_H),
         );
-        if !force && self.last_resize_request.get().elapsed() < Duration::from_millis(32) {
+        if !force && self.last_resize_request.get().elapsed() < Duration::from_millis(16) {
             return;
         }
-        let mut size = self.window_size.lock().unwrap();
-        if *size != clamped {
-            *size = clamped;
-            drop(size);
-            self.last_resize_request.set(Instant::now());
-            self.gui_context.request_resize();
+        if !force && self.last_sent_logical_size.get() == clamped {
+            return;
         }
+
+        self.last_sent_logical_size.set(clamped);
+        self.last_resize_request.set(Instant::now());
+
+        self.set_canvas_logical_size(cx, clamped.0, clamped.1);
+        cx.emit(WindowEvent::SetSize(WindowSize {
+            width: clamped.0,
+            height: clamped.1,
+        }));
     }
 
     fn toggle_fullscreen(&self, cx: &mut EventContext) {
-        if let Some((prev_w, prev_h)) = self.pre_fullscreen_size.take() {
-            self.request_window_resize(prev_w, prev_h, true);
+        if let Some(prev) = self.pre_fullscreen.take() {
+            self.request_window_resize(cx, prev.logical_w, prev.logical_h, true);
+            win32_window::restore_root_window_pos(
+                self.parent_hwnd.load(Ordering::Acquire),
+                prev.root_left,
+                prev.root_top,
+            );
         } else {
-            let current = *self.window_size.lock().unwrap();
-            self.pre_fullscreen_size.set(Some(current));
+            let (cur_w, cur_h) = self.current_logical_size(cx.scale_factor());
+            let hwnd = self.parent_hwnd.load(Ordering::Acquire);
+            if let Some(target) = win32_window::enter_fullscreen_on_monitor(hwnd) {
+                self.pre_fullscreen.set(Some(PreFullscreenState {
+                    logical_w: cur_w,
+                    logical_h: cur_h,
+                    root_left: target.prev_root_left,
+                    root_top: target.prev_root_top,
+                }));
 
-            let (phys_w, phys_h) = win32_window::current_monitor_work_size();
-            let scale = self.current_true_scale(cx.scale_factor());
-            let logical_w = ((phys_w as f32 / scale).floor() as u32)
-                .saturating_sub(32)
-                .clamp(MIN_LOGICAL_W, MAX_LOGICAL_W);
-            let logical_h = ((phys_h as f32 / scale).floor() as u32)
-                .saturating_sub(64)
-                .clamp(MIN_LOGICAL_H, MAX_LOGICAL_H);
-            self.request_window_resize(logical_w, logical_h, true);
+                let scale = cx.scale_factor().max(1.0);
+                let logical_w = ((target.avail_phys_w as f32 / scale).floor() as u32)
+                    .clamp(MIN_LOGICAL_W, MAX_LOGICAL_W);
+                let logical_h = ((target.avail_phys_h as f32 / scale).floor() as u32)
+                    .clamp(MIN_LOGICAL_H, MAX_LOGICAL_H);
+                self.request_window_resize(cx, logical_w, logical_h, true);
+            }
         }
         self.state.lock().unwrap().auto_fit = true;
     }
@@ -161,6 +231,35 @@ impl View for RackCanvas {
 
     fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
         event.map(|window_event, _| match window_event {
+            WindowEvent::GeometryChanged(_) => {
+                if self.window_resize_drag.get().is_none() {
+                    let hwnd = self.parent_hwnd.load(Ordering::Acquire);
+                    if let Some((phys_w, phys_h)) = win32_window::parent_client_size(hwnd) {
+                        let scale = cx.scale_factor().max(1.0);
+                        let new_w = ((phys_w as f32 / scale).round() as u32)
+                            .clamp(MIN_LOGICAL_W, MAX_LOGICAL_W);
+                        let new_h = ((phys_h as f32 / scale).round() as u32)
+                            .clamp(MIN_LOGICAL_H, MAX_LOGICAL_H);
+                        if self.last_sent_logical_size.get() != (new_w, new_h) {
+                            self.last_sent_logical_size.set((new_w, new_h));
+                            self.set_canvas_logical_size(cx, new_w, new_h);
+                        }
+                    }
+                }
+            }
+
+            WindowEvent::FocusOut => {
+                if self.window_resize_drag.get().is_none() {
+                    cx.release();
+                }
+                let mut state = self.state.lock().unwrap();
+                state.cable_drag = None;
+                state.module_drag = None;
+                state.drawer_drag = None;
+                state.knob_drag = None;
+                state.pan_drag = None;
+            }
+
             WindowEvent::KeyDown(code, _) => {
                 if *code == Code::Escape && self.is_fullscreen() {
                     self.toggle_fullscreen(cx);
@@ -198,7 +297,8 @@ impl View for RackCanvas {
                     if state.active_drawer == Some(RightDrawerTab::Modules) {
                         let (_, _, _, total_h) = Self::layout_module_drawer_entries(0.0);
                         let max_scroll = (total_h - win_h).max(0.0);
-                        state.drawer_scroll = (state.drawer_scroll - *dy * 36.0).clamp(0.0, max_scroll);
+                        state.drawer_scroll =
+                            (state.drawer_scroll - *dy * 36.0).clamp(0.0, max_scroll);
                         cx.needs_redraw();
                     }
                     return;
@@ -232,9 +332,13 @@ impl View for RackCanvas {
             }
 
             WindowEvent::MouseDown(button) => {
+                cx.capture();
+
                 let mx = cx.mouse().cursorx;
                 let my = cx.mouse().cursory;
                 let (win_w, win_h) = self.last_size.get();
+                let scale = cx.scale_factor().max(1.0);
+                let grip_size = RESIZE_GRIP_SIZE * scale;
                 let modifiers = cx.modifiers();
 
                 let mut toggle_full_requested = false;
@@ -250,7 +354,11 @@ impl View for RackCanvas {
 
                             if mx >= cx_b && mx <= cx_b + cw_b && my >= cy_b && my <= cy_b + ch_b {
                                 state.pending_preset = None;
-                            } else if mx >= ox_b && mx <= ox_b + ow_b && my >= oy_b && my <= oy_b + oh_b {
+                            } else if mx >= ox_b
+                                && mx <= ox_b + ow_b
+                                && my >= oy_b
+                                && my <= oy_b + oh_b
+                            {
                                 state.pending_preset = None;
                                 state.apply_preset(preset_idx);
                             }
@@ -261,13 +369,10 @@ impl View for RackCanvas {
 
                     if *button == MouseButton::Left
                         && !self.is_fullscreen()
-                        && mx >= win_w - RESIZE_GRIP_SIZE
-                        && my >= win_h - RESIZE_GRIP_SIZE
+                        && mx >= win_w - grip_size
+                        && my >= win_h - grip_size
                     {
-                        let scale = self.current_true_scale(cx.scale_factor());
-                        let logical_w = (win_w / scale).round();
-                        let logical_h = (win_h / scale).round();
-                        self.window_resize_drag.set(Some((mx, my, logical_w, logical_h)));
+                        self.window_resize_drag.set(Some((mx, my, win_w, win_h)));
                         return;
                     }
 
@@ -628,17 +733,19 @@ impl View for RackCanvas {
             }
 
             WindowEvent::MouseMove(mx, my) => {
-                if let Some((start_mx, start_my, start_logical_w, start_logical_h)) =
+                if let Some((start_mx, start_my, start_phys_w, start_phys_h)) =
                     self.window_resize_drag.get()
                 {
-                    let scale = self.current_true_scale(cx.scale_factor());
-                    let new_w = (start_logical_w + (*mx - start_mx) / scale)
+                    let scale = cx.scale_factor().max(1.0);
+                    let new_w = ((start_phys_w + (*mx - start_mx)) / scale)
+                        .round()
                         .clamp(MIN_LOGICAL_W as f32, MAX_LOGICAL_W as f32)
-                        .round() as u32;
-                    let new_h = (start_logical_h + (*my - start_my) / scale)
+                        as u32;
+                    let new_h = ((start_phys_h + (*my - start_my)) / scale)
+                        .round()
                         .clamp(MIN_LOGICAL_H as f32, MAX_LOGICAL_H as f32)
-                        .round() as u32;
-                    self.request_window_resize(new_w, new_h, false);
+                        as u32;
+                    self.request_window_resize(cx, new_w, new_h, false);
                     return;
                 }
 
@@ -727,20 +834,26 @@ impl View for RackCanvas {
             }
 
             WindowEvent::MouseUp(button) => {
+                cx.release();
+
                 if *button == MouseButton::Left {
-                    if let Some((start_mx, start_my, start_logical_w, start_logical_h)) =
+                    if let Some((start_mx, start_my, start_phys_w, start_phys_h)) =
                         self.window_resize_drag.take()
                     {
                         let mx = cx.mouse().cursorx;
                         let my = cx.mouse().cursory;
-                        let scale = self.current_true_scale(cx.scale_factor());
-                        let new_w = (start_logical_w + (mx - start_mx) / scale)
+                        let scale = cx.scale_factor().max(1.0);
+                        let new_w = ((start_phys_w + (mx - start_mx)) / scale)
+                            .round()
                             .clamp(MIN_LOGICAL_W as f32, MAX_LOGICAL_W as f32)
-                            .round() as u32;
-                        let new_h = (start_logical_h + (my - start_my) / scale)
+                            as u32;
+                        let new_h = ((start_phys_h + (my - start_my)) / scale)
+                            .round()
                             .clamp(MIN_LOGICAL_H as f32, MAX_LOGICAL_H as f32)
-                            .round() as u32;
-                        self.request_window_resize(new_w, new_h, true);
+                            as u32;
+                        self.request_window_resize(cx, new_w, new_h, true);
+                        cx.needs_redraw();
+                        return;
                     }
                 }
 

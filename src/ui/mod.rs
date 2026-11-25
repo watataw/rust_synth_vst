@@ -6,7 +6,7 @@ mod render;
 pub mod state;
 pub mod theme;
 mod visualizers;
-mod win32_window;
+pub(crate) mod win32_window;
 
 pub use canvas::*;
 pub use presets::*;
